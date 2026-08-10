@@ -10,6 +10,12 @@ const formatMessage = require('format-message');
  */
 const maybeFormatMessage = function (maybeMessage, args, locale) {
     if (maybeMessage && maybeMessage.id && maybeMessage.default) {
+        if (typeof maybeMessage.default !== 'string') {
+            return formatMessage({
+                ...maybeMessage,
+                default: String(maybeMessage.default)
+            }, args, locale);
+        }
         return formatMessage(maybeMessage, args, locale);
     }
     return maybeMessage;

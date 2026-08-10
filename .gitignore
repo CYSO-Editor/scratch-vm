@@ -20,3 +20,7 @@ npm-*
 
 # Localization
 /translations
+
+# Local dependency test fixtures (large sample projects, not needed to build)
+/local-deps/scratch-parser/test/
+/local-deps/scratch-render-fonts/test/

@@ -1,6 +1,37 @@
 const uid = require('../util/uid');
 const frameSource = require('./tw-load-script-as-plain-text!./tw-iframe-extension-worker-entry');
 
+const MIME_BY_EXTENSION = {
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  ogv: 'video/ogg',
+  ogg: 'video/ogg',
+  mov: 'video/quicktime',
+  avi: 'video/x-msvideo',
+  mkv: 'video/x-matroska',
+  m4v: 'video/mp4',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  oga: 'audio/ogg',
+  m4a: 'audio/mp4',
+  flac: 'audio/flac',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  svg: 'image/svg+xml',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  json: 'application/json',
+  txt: 'text/plain',
+  pdf: 'application/pdf'
+};
+
+const mimeFromName = (name) => {
+  const ext = String(name || '').split('.').pop().toLowerCase();
+  return MIME_BY_EXTENSION[ext] || '';
+};
+
 const none = "'none'";
 const featurePolicy = {
     'accelerometer': none,
@@ -60,6 +91,51 @@ class IframeExtensionWorker {
 
     _onWindowMessage (e) {
         if (!e.data || e.data.vmIframeId !== this.id) {
+            return;
+        }
+        if (e.data.cysoOpenFile) {
+            const {requestId, accept, multiple} = e.data;
+            const EP = window.EditorPreload;
+            const reply = (files) => {
+                if (this.iframe && this.iframe.contentWindow) {
+                    this.iframe.contentWindow.postMessage({
+                        vmIframeId: this.id,
+                        cysoFileResult: true,
+                        requestId,
+                        files: files || []
+                    }, '*');
+                }
+            };
+            if (!EP || typeof EP.showOpenFilePicker !== 'function' || typeof EP.getFile !== 'function') {
+                reply([]);
+                return;
+            }
+            const filters = (accept && accept.length)
+                ? [{name: 'Files', extensions: accept}]
+                : [{name: 'All Files', extensions: ['*']}];
+            Promise.resolve(EP.showOpenFilePicker({
+                filters,
+                properties: multiple ? ['openFile', 'multiSelections'] : ['openFile'],
+                multiple
+            }))
+                .then((result) => {
+                    if (!result) {
+                        reply([]);
+                        return;
+                    }
+                    const list = Array.isArray(result) ? result : [result];
+                    return Promise.all(list.map((r) =>
+                        EP.getFile(r.id).then((d) => ({
+                            name: d.name || r.name,
+                            type: mimeFromName(d.name) || '',
+                            data: d.data
+                        }))
+                    )).then(reply);
+                })
+                .catch((err) => {
+                    console.error('iframe file picker error:', err);
+                    reply([]);
+                });
             return;
         }
         if (e.data.ready) {

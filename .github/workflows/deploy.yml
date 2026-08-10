@@ -2,8 +2,6 @@ name: Deploy playground
 
 on:
   workflow_dispatch:
-  push:
-    branches: [develop]
 
 concurrency:
   group: "deploy"

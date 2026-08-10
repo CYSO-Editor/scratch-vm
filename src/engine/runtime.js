@@ -56,6 +56,7 @@ const MonitorRecord = require('./monitor-record.js');
 const defaultExtensionColors = ['#0FBD8C', '#0DA57A', '#0B8E69'];
 
 const COMMENT_CONFIG_MAGIC = ' // _twconfig_';
+const CYSO_CORE_CONFIG_MAGIC = ' // _cysocore_';
 
 /**
  * Information used for converting Scratch argument types into scratch-blocks data.
@@ -465,6 +466,10 @@ class Runtime extends EventEmitter {
         };
 
         this.debug = false;
+
+        // CYSO Core 设置
+        this.cysoCoreEnabled = false;
+        this.extensionPermissions = {};
 
         this._lastStepTime = Date.now();
         this.interpolationEnabled = false;
@@ -2223,7 +2228,26 @@ class Runtime extends EventEmitter {
             // (i.e., before the predicate can be run) because "broadcast and wait"
             // needs to have a precise collection of started threads.
             for (const matchField in optMatchFields) {
-                if (hatFields[matchField].value !== optMatchFields[matchField]) {
+                let fieldValue = null;
+                if (hatFields[matchField] && hatFields[matchField].value !== undefined) {
+                    fieldValue = hatFields[matchField].value;
+                } else if (target) {
+                    const inputs = target.blocks.getInputs(topBlockId);
+                    if (inputs && inputs[matchField] && inputs[matchField].block) {
+                        const shadowBlock = target.blocks.getBlock(inputs[matchField].block);
+                        if (shadowBlock && shadowBlock.fields) {
+                            const shadowField = Object.values(shadowBlock.fields)[0];
+                            if (shadowField && shadowField.value !== undefined) {
+                                fieldValue = shadowField.value;
+                            }
+                        }
+                    }
+                }
+                if (fieldValue === null) {
+                    // Field mismatch: requested field does not exist on this hat.
+                    return;
+                }
+                if (String(fieldValue).toUpperCase() !== optMatchFields[matchField]) {
                     // Field mismatch.
                     return;
                 }
@@ -2286,6 +2310,8 @@ class Runtime extends EventEmitter {
 
         this.targets.map(this.disposeTarget, this);
         this.extensionStorage = {};
+        this.cysoCoreEnabled = false;
+        this.extensionPermissions = {};
         // tw: explicitly emit a MONITORS_UPDATE instead of relying on implicit behavior of _step()
         if (!this._monitorState.empty()) {
             this._monitorState = new MonitorState();
@@ -2928,6 +2954,61 @@ class Runtime extends EventEmitter {
             target.createComment(uid(), null, text, 50, 50, 350, 170, false);
         }
         this.emitProjectChanged();
+    }
+
+    findCYSOConfigComment () {
+        const target = this.getTargetForStage();
+        const comments = target.comments;
+        for (const comment of Object.values(comments)) {
+            if (comment.text.includes(CYSO_CORE_CONFIG_MAGIC)) {
+                return comment;
+            }
+        }
+        return null;
+    }
+
+    storeCYSOConfig () {
+        if (!this.cysoCoreEnabled) return;
+        
+        const options = {
+            cysoCoreEnabled: this.cysoCoreEnabled,
+            extensionPermissions: this.extensionPermissions || {}
+        };
+        
+        const text = `CYSO Core Configuration\n请勿手动编辑此注释，删除此注释可移除CYSO设置\n${ExtendedJSON.stringify(options)}${CYSO_CORE_CONFIG_MAGIC}`;
+        const existingComment = this.findCYSOConfigComment();
+        if (existingComment) {
+            existingComment.text = text;
+        } else {
+            const target = this.getTargetForStage();
+            target.createComment(uid(), null, text, 400, 50, 300, 150, false);
+        }
+        this.emitProjectChanged();
+    }
+
+    parseCYSOConfig () {
+        const comment = this.findCYSOConfigComment();
+        if (!comment) return;
+        
+        const lineWithMagic = comment.text.split('\n').find(i => i.endsWith(CYSO_CORE_CONFIG_MAGIC));
+        if (!lineWithMagic) return;
+        
+        const jsonText = lineWithMagic.substr(0, lineWithMagic.length - CYSO_CORE_CONFIG_MAGIC.length);
+        let parsed;
+        try {
+            parsed = ExtendedJSON.parse(jsonText);
+        } catch (e) {
+            log.warn('Failed to parse CYSO config', e);
+            return;
+        }
+        
+        if (parsed) {
+            this.cysoCoreEnabled = parsed.cysoCoreEnabled || false;
+            const extPerms = parsed.extensionPermissions || {};
+            const looksFlat = Object.keys(extPerms).length > 0 &&
+                Object.values(extPerms).every(v => typeof v === 'string');
+            this.extensionPermissions = looksFlat ? {} : extPerms;
+        }
     }
 
     /**

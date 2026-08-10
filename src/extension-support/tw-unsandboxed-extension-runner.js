@@ -4,13 +4,97 @@ const AsyncLimiter = require('../util/async-limiter');
 const createTranslate = require('./tw-l10n');
 const staticFetch = require('../util/tw-static-fetch');
 
+let currentExtensionId = null;
+const usedExtensionIds = new Set();
+
+let runtimeToken = null;
+const claimRuntimeToken = () => {
+    if (runtimeToken) return;
+    if (typeof EditorPreload !== 'undefined' && typeof EditorPreload.claimExtensionRuntime === 'function') {
+        runtimeToken = EditorPreload.claimExtensionRuntime();
+    }
+};
+
+const allocateExtensionId = (baseId) => {
+    if (!usedExtensionIds.has(baseId)) {
+        usedExtensionIds.add(baseId);
+        return baseId;
+    }
+    let n = 1;
+    let candidate;
+    do {
+        candidate = `${baseId}#${n}`;
+        n++;
+    } while (usedExtensionIds.has(candidate));
+    usedExtensionIds.add(candidate);
+    return candidate;
+};
+
+const getCurrentExtensionId = () => currentExtensionId;
+const setCurrentExtensionId = id => {
+    currentExtensionId = id;
+};
+
+const setCurrentExtensionInfo = (id) => {
+    currentExtensionId = id;
+    if (typeof EditorPreload !== 'undefined' && typeof EditorPreload.setActiveExtensionId === 'function') {
+        EditorPreload.setActiveExtensionId(runtimeToken, id);
+    }
+};
+
+const tagExtensionBlocks = (extensionObject, info, extId) => {
+    const blocks = (info && info.blocks) || [];
+    for (const b of blocks) {
+        const opcode = b && b.opcode;
+        if (opcode && typeof extensionObject[opcode] === 'function') {
+            const original = extensionObject[opcode];
+            extensionObject[opcode] = function (...args) {
+                if (typeof EditorPreload !== 'undefined' && typeof EditorPreload.pushActiveExtensionId === 'function') {
+                    EditorPreload.pushActiveExtensionId(runtimeToken, extId);
+                }
+                currentExtensionId = extId;
+                let result;
+                try {
+                    result = original.apply(this, args);
+                } finally {
+                    const cleanup = () => {
+                        if (typeof EditorPreload !== 'undefined' && typeof EditorPreload.popActiveExtensionId === 'function') {
+                            EditorPreload.popActiveExtensionId(runtimeToken);
+                        }
+                    };
+                    if (result && typeof result.then === 'function') {
+                        result.then(cleanup, cleanup);
+                    } else {
+                        cleanup();
+                    }
+                }
+                return result;
+            };
+        }
+    }
+};
+
+const PERMISSION_TYPES = {
+    FILE_READ: 'file-read',
+    FILE_WRITE: 'file-write',
+    FILE_DELETE: 'file-delete',
+    FILE_METADATA: 'file-metadata',
+    SYSTEM_COMMAND: 'system-command',
+    GLOBAL_SHORTCUT: 'global-shortcut',
+    DRAW_WINDOW: 'draw-window',
+    SCREEN_CAPTURE: 'screen-capture',
+    ADVANCED_WINDOW: 'advanced-window',
+    HARDWARE_STATUS: 'hardware-status',
+    SYSTEM_NOTIFICATION: 'system-notification',
+    CLIPBOARD_READ: 'clipboard-read',
+    CLIPBOARD_WRITE: 'clipboard-write',
+    DEVICE_CAMERA: 'device-camera',
+    DEVICE_MICROPHONE: 'device-microphone',
+    DEVICE_GEOLOCATION: 'device-geolocation'
+};
+
 /* eslint-disable require-await */
 
-/**
- * Parse a URL object or return null.
- * @param {string} url
- * @returns {URL|null}
- */
 const parseURL = url => {
     try {
         return new URL(url, location.href);
@@ -19,20 +103,39 @@ const parseURL = url => {
     }
 };
 
-/**
- * Sets up the global.Scratch API for an unsandboxed extension.
- * @param {VirtualMachine} vm
- * @returns {Promise<object[]>} Resolves with a list of extension objects when Scratch.extensions.register is called.
- */
 const setupUnsandboxedExtensionAPI = vm => new Promise(resolve => {
+    claimRuntimeToken();
+
     const extensionObjects = [];
-    const register = extensionObject => {
+    
+    const register = (extensionObject, declaredPermissions = null) => {
         extensionObjects.push(extensionObject);
+        const info = extensionObject.getInfo();
+        if (info && info.id) {
+            const extId = allocateExtensionId(info.id);
+            info.id = extId;
+            const extName = info.name || extId;
+            const permissions = declaredPermissions || info.permissions || [];
+            
+        setCurrentExtensionInfo(extId, extName, permissions);
+
+        tagExtensionBlocks(extensionObject, info, extId);
+        
+        if (vm.securityManager.registerExtension) {
+          vm.securityManager.registerExtension(extId, extName, permissions);
+        }
+
+        if (typeof EditorPreload !== 'undefined' && typeof EditorPreload.registerExtensionPermissions === 'function') {
+          EditorPreload.registerExtensionPermissions(runtimeToken, extId, permissions, extName).catch(() => {});
+        }
+        }
         resolve(extensionObjects);
     };
 
-    // Create a new copy of global.Scratch for each extension
     const Scratch = Object.assign({}, global.Scratch || {}, ScratchCommon);
+    
+    Scratch.PERMISSION_TYPES = PERMISSION_TYPES;
+    
     Scratch.extensions = {
         unsandboxed: true,
         register
@@ -40,7 +143,17 @@ const setupUnsandboxedExtensionAPI = vm => new Promise(resolve => {
     Scratch.vm = vm;
     Scratch.renderer = vm.runtime.renderer;
 
-    Scratch.canFetch = async url => {
+    const wrapWithExtensionId = (fn, permissionType) => {
+        return async (...args) => {
+            const extId = getCurrentExtensionId();
+            if (extId && vm.securityManager.setCurrentExtensionId) {
+                vm.securityManager.setCurrentExtensionId(extId);
+            }
+            return fn(...args);
+        };
+    };
+
+    Scratch.canFetch = wrapWithExtensionId(async url => {
         const parsed = parseURL(url);
         if (!parsed) {
             return false;
@@ -50,9 +163,9 @@ const setupUnsandboxedExtensionAPI = vm => new Promise(resolve => {
             return true;
         }
         return vm.securityManager.canFetch(parsed.href);
-    };
+    }, 'fetch');
 
-    Scratch.canOpenWindow = async url => {
+    Scratch.canOpenWindow = wrapWithExtensionId(async url => {
         const parsed = parseURL(url);
         if (!parsed) {
             return false;
@@ -63,9 +176,9 @@ const setupUnsandboxedExtensionAPI = vm => new Promise(resolve => {
             return false;
         }
         return vm.securityManager.canOpenWindow(parsed.href);
-    };
+    }, 'openWindow');
 
-    Scratch.canRedirect = async url => {
+    Scratch.canRedirect = wrapWithExtensionId(async url => {
         const parsed = parseURL(url);
         if (!parsed) {
             return false;
@@ -76,27 +189,27 @@ const setupUnsandboxedExtensionAPI = vm => new Promise(resolve => {
             return false;
         }
         return vm.securityManager.canRedirect(parsed.href);
-    };
+    }, 'redirect');
 
-    Scratch.canRecordAudio = async () => vm.securityManager.canRecordAudio();
+    Scratch.canRecordAudio = wrapWithExtensionId(async () => vm.securityManager.canRecordAudio(), 'recordAudio');
 
-    Scratch.canRecordVideo = async () => vm.securityManager.canRecordVideo();
+    Scratch.canRecordVideo = wrapWithExtensionId(async () => vm.securityManager.canRecordVideo(), 'recordVideo');
 
-    Scratch.canReadClipboard = async () => vm.securityManager.canReadClipboard();
+    Scratch.canReadClipboard = wrapWithExtensionId(async () => vm.securityManager.canReadClipboard(), 'readClipboard');
 
-    Scratch.canNotify = async () => vm.securityManager.canNotify();
+    Scratch.canNotify = wrapWithExtensionId(async () => vm.securityManager.canNotify(), 'notify');
 
-    Scratch.canGeolocate = async () => vm.securityManager.canGeolocate();
+    Scratch.canGeolocate = wrapWithExtensionId(async () => vm.securityManager.canGeolocate(), 'geolocate');
 
-    Scratch.canEmbed = async url => {
+    Scratch.canEmbed = wrapWithExtensionId(async url => {
         const parsed = parseURL(url);
         if (!parsed) {
             return false;
         }
         return vm.securityManager.canEmbed(parsed.href);
-    };
+    }, 'embed');
 
-    Scratch.canDownload = async (url, name) => {
+    Scratch.canDownload = wrapWithExtensionId(async (url, name) => {
         const parsed = parseURL(url);
         if (!parsed) {
             return false;
@@ -107,7 +220,7 @@ const setupUnsandboxedExtensionAPI = vm => new Promise(resolve => {
             return false;
         }
         return vm.securityManager.canDownload(url, name);
-    };
+    }, 'download');
 
     Scratch.fetch = async (url, options) => {
         const actualURL = url instanceof Request ? url.url : url;

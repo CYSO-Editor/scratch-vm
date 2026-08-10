@@ -349,9 +349,14 @@ class VirtualMachine extends EventEmitter {
 
     storeProjectOptions () {
         this.runtime.storeProjectOptions();
+        this.runtime.storeCYSOConfig();
         if (this.editingTarget.isStage) {
             this.emitWorkspaceUpdate();
         }
+    }
+
+    storeCYSOConfig () {
+        this.runtime.storeCYSOConfig();
     }
 
     enableDebug () {
@@ -771,12 +776,18 @@ class VirtualMachine extends EventEmitter {
     async _loadExtensions (extensionIDs, extensionURLs = new Map()) {
         const defaultExtensionURLs = require('./extension-support/tw-default-extension-urls');
         const extensionPromises = [];
+        
+        const urlsToCheck = [];
+        const urlToExtensionId = new Map();
+        
         for (const extensionID of extensionIDs) {
             if (this.extensionManager.isExtensionLoaded(extensionID)) {
                 // Already loaded
+                continue;
             } else if (this.extensionManager.isBuiltinExtension(extensionID)) {
                 // Builtin extension
                 this.extensionManager.loadExtensionIdSync(extensionID);
+                continue;
             } else {
                 // Custom extension
                 let url = extensionURLs.get(extensionID);
@@ -784,15 +795,42 @@ class VirtualMachine extends EventEmitter {
                     url = defaultExtensionURLs[extensionID];
                 }
                 if (!url) {
-                    throw new Error(`Unknown extension: ${extensionID}`);
+                    if (this.runtime.cysoCoreEnabled && /cyso[\W_]{0,3}core/i.test(extensionID)) {
+                        continue;
+                    }
+                    log.warn(`Unknown extension, skipping: ${extensionID}`);
+                    continue;
                 }
+                
+                // 收集URL和对应的扩展ID
+                urlsToCheck.push(url);
+                urlToExtensionId.set(url, extensionID);
+            }
+        }
+        
+        if (urlsToCheck.length > 1 && this.securityManager.batchLoadExtensions) {
+            const allowedResults = await this.securityManager.batchLoadExtensions(urlsToCheck);
+
+            urlsToCheck.forEach((url, index) => {
+                if (allowedResults[index]) {
+                    extensionPromises.push(this.extensionManager.loadExtensionURL(url));
+                } else {
+                    const extensionID = urlToExtensionId.get(url);
+                    log.warn(`Permission to load extension denied, skipping: ${extensionID}`);
+                }
+            });
+        } else {
+            // 单个扩展或旧模式，使用原有的逐个检查方式
+            for (const url of urlsToCheck) {
                 if (await this.securityManager.canLoadExtensionFromProject(url)) {
                     extensionPromises.push(this.extensionManager.loadExtensionURL(url));
                 } else {
-                    throw new Error(`Permission to load extension denied: ${extensionID}`);
+                    const extensionID = urlToExtensionId.get(url);
+                    log.warn(`Permission to load extension denied, skipping: ${extensionID}`);
                 }
             }
         }
+        
         return Promise.all(extensionPromises);
     }
 
@@ -808,9 +846,18 @@ class VirtualMachine extends EventEmitter {
 
         targets = targets.filter(target => !!target);
 
+        const stageTarget = targets.find(t => t.isStage);
+        if (stageTarget && wholeProject) {
+            this.runtime.addTarget(stageTarget);
+            this.runtime.parseProjectOptions();
+            this.runtime.parseCYSOConfig();
+        }
+
         return this._loadExtensions(extensions.extensionIDs, extensions.extensionURLs).then(() => {
             targets.forEach(target => {
-                this.runtime.addTarget(target);
+                if (!this.runtime.targets.includes(target)) {
+                    this.runtime.addTarget(target);
+                }
                 (/** @type RenderedTarget */ target).updateAllDrawableProperties();
                 // Ensure unique sprite name
                 if (target.isSprite()) this.renameSprite(target.id, target.getName());
@@ -831,10 +878,6 @@ class VirtualMachine extends EventEmitter {
 
             if (!wholeProject) {
                 this.editingTarget.fixUpVariableReferences();
-            }
-
-            if (wholeProject) {
-                this.runtime.parseProjectOptions();
             }
 
             // Update the VM user's knowledge of targets and blocks on the workspace.
@@ -1489,6 +1532,54 @@ class VirtualMachine extends EventEmitter {
         if (this.editingTarget) {
             this.editingTarget.blocks.blocklyListen(e);
         }
+    }
+
+    /**
+     * Create a Blockly event listener scoped to one target, so that a secondary
+     * workspace can edit that target without changing the editing target.
+     * @param {!string} targetId Id of the target the workspace is showing.
+     * @return {!Function} Listener to register on that workspace.
+     */
+    blockListenerForTarget (targetId) {
+        return e => {
+            const target = this.runtime.getTargetById(targetId);
+            if (target) {
+                const prevTarget = this.runtime._editingTarget;
+                this.runtime._editingTarget = target;
+                try {
+                    target.blocks.blocklyListen(e);
+                } finally {
+                    this.runtime._editingTarget = prevTarget;
+                }
+            }
+        };
+    }
+
+    /**
+     * Serialize the blocks, variables and comments of one target as workspace XML.
+     * @param {!string} targetId Id of the target to serialize.
+     * @return {?string} Workspace XML, or null when the target does not exist.
+     */
+    getBlocksXMLForTarget (targetId) {
+        const target = this.runtime.getTargetById(targetId);
+        if (!target) return null;
+        const globalVarMap = Object.assign({}, this.runtime.getTargetForStage().variables);
+        const localVarMap = target.isStage ?
+            Object.create(null) :
+            Object.assign({}, target.variables);
+        const globalVariables = Object.keys(globalVarMap).map(k => globalVarMap[k]);
+        const localVariables = Object.keys(localVarMap).map(k => localVarMap[k]);
+        const workspaceComments = Object.keys(target.comments)
+            .map(k => target.comments[k])
+            .filter(c => c.blockId === null);
+        return `<xml xmlns="http://www.w3.org/1999/xhtml">
+                    <variables>
+                        ${globalVariables.map(v => v.toXML()).join()}
+                        ${localVariables.map(v => v.toXML(true)).join()}
+                    </variables>
+                    ${workspaceComments.map(c => c.toXML()).join()}
+                    ${target.blocks.toXML(target.comments)}
+                </xml>`;
     }
 
     /**

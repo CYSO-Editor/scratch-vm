@@ -189,7 +189,8 @@ class ExtensionManager {
                 parsedURL.protocol === 'https:' ||
                 parsedURL.protocol === 'http:' ||
                 parsedURL.protocol === 'data:' ||
-                parsedURL.protocol === 'file:'
+                parsedURL.protocol === 'file:' ||
+                parsedURL.protocol === 'blob:'
             );
         } catch (e) {
             return false;
@@ -405,6 +406,9 @@ class ExtensionManager {
         extensionInfo.blocks = extensionInfo.blocks || [];
         extensionInfo.targetTypes = extensionInfo.targetTypes || [];
         extensionInfo.blocks = extensionInfo.blocks.reduce((results, blockInfo) => {
+            if (!blockInfo) {
+                return results;
+            }
             try {
                 let result;
                 switch (blockInfo) {
