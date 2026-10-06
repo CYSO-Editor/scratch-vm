@@ -36,6 +36,8 @@ const Video = require('../io/video');
 
 const StringUtil = require('../util/string-util');
 const uid = require('../util/uid');
+const AsyncLimiter = require('../util/async-limiter');
+const loadSound = require('../import/load-sound.js').loadSound;
 
 const defaultBlockPackages = {
     scratch3_control: require('../blocks/scratch3_control'),
@@ -1950,6 +1952,109 @@ class Runtime extends EventEmitter {
         this.renderer.setLayerGroupOrdering(StageLayering.LAYER_GROUPS);
         this.renderer.offscreenTouching = !this.runtimeOptions.fencing;
         this.updatePrivacy();
+        if (typeof renderer.on === 'function' && !renderer.__cysoContextRestoreHooked) {
+            renderer.__cysoContextRestoreHooked = true;
+            renderer.on('ContextRestored', () => {
+                this._reloadCostumesAfterContextRestored();
+            });
+        }
+    }
+
+    /**
+     * Re-create skins for every costume after a WebGL context restore.
+     * @returns {Promise} resolves when every costume has a working skin again
+     */
+    _reloadCostumesAfterContextRestored () {
+        const {loadCostume} = require('../import/load-costume.js');
+        const seen = new Set();
+        const promises = [];
+        for (const target of this.targets) {
+            const sprite = target.sprite;
+            if (!sprite) continue;
+            for (const costume of sprite.costumes) {
+                if (seen.has(costume)) continue;
+                seen.add(costume);
+                if (typeof costume.skinId !== 'number' || costume.skinId < 0) continue;
+                const oldSkinId = costume.skinId;
+                costume.skinId = null;
+                if (!costume.md5) continue;
+                promises.push(loadCostume(costume.md5, costume, this).then(() => {
+                    // Destroy the dead skin only after the replacement exists,
+                    // so drawables never point at a destroyed skin.
+                    try {
+                        this.renderer.destroySkin(oldSkinId);
+                    } catch (e) {
+                        // Old skin resources are already invalid; ignore
+                    }
+                }).catch(error => {
+                    log.warn(`Failed to reload costume after context restore: ${error}`);
+                }));
+            }
+        }
+        return Promise.all(promises).then(() => {
+            for (const target of this.targets) {
+                target.updateAllDrawableProperties();
+            }
+            if (this.renderer) {
+                this.renderer.dirty = true;
+            }
+        });
+    }
+
+    /**
+     * Start background decoding of sounds that were imported with deferred
+     * audio decoding. The queue is invalidated whenever the runtime is
+     * disposed.
+     */
+    startDeferredSoundDecoding () {
+        if (!this.audioEngine) return;
+        const token = this._deferredSoundToken = (this._deferredSoundToken || 0) + 1;
+        if (!this._deferredSoundLimiter) {
+            this._deferredSoundLimiter = new AsyncLimiter((sound, soundBank, sprite, limiterToken) => {
+                if (limiterToken !== this._deferredSoundToken) {
+                    return Promise.resolve(null);
+                }
+                return loadSound(sound, this, soundBank).then(() => {
+                    if (this.editingTarget && this.editingTarget.sprite === sprite) {
+                        this.emitTargetsUpdate(false);
+                    }
+                }).catch(error => {
+                    log.warn(`Failed to decode deferred sound: ${sound && sound.md5} ${error}`);
+                });
+            }, 8);
+        }
+        // Decode the editing target's sounds first: the user is most likely to
+        // interact with them right after the project loads.
+        const targetsToScan = [];
+        const editingSprite = this.editingTarget && this.editingTarget.sprite;
+        if (editingSprite) targetsToScan.push(editingSprite);
+        for (const target of this.targets) {
+            if (target.sprite && target.sprite !== editingSprite) targetsToScan.push(target.sprite);
+        }
+        for (const sprite of targetsToScan) {
+            if (!sprite.soundBank) continue;
+            for (const sound of sprite.sounds) {
+                if (typeof sound.soundId === 'undefined' && !sound._deferredDecodeQueued) {
+                    sound._deferredDecodeQueued = true;
+                    this._deferredSoundLimiter.do(sound, sprite.soundBank, sprite, token);
+                }
+            }
+        }
+    }
+
+    /**
+     * Decode a single sound immediately.
+     * @param {object} sound the sound object to decode
+     * @param {SoundBank} soundBank the sound bank of the owning sprite
+     * @returns {Promise} resolves when the sound is playable (or permanently failed)
+     */
+    decodeSoundNow (sound, soundBank) {
+        if (!this.audioEngine || !soundBank) {
+            return Promise.resolve(null);
+        }
+        return loadSound(sound, this, soundBank).catch(error => {
+            log.warn(`Failed to decode sound on demand: ${sound && sound.md5} ${error}`);
+        });
     }
 
     /**
@@ -2303,6 +2408,7 @@ class Runtime extends EventEmitter {
      */
     dispose () {
         this.stopAll();
+        this._deferredSoundToken = (this._deferredSoundToken || 0) + 1;
         // Deleting each target's variable's monitors.
         this.targets.forEach(target => {
             if (target.isOriginal) target.deleteMonitors();

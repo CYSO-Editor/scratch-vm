@@ -21,7 +21,7 @@ const loadVector_ = function (costume, runtime, rotationCenter, optVersion) {
         // SVG Renderer load fixes "quirks" associated with Scratch 2 projects
         if (optVersion && optVersion === 2) {
             // scratch-svg-renderer fixes syntax that causes loading issues,
-            // and if optVersion is 2, fixes "quirks" associated with Scratch 2 SVGs,
+            // and optVersion is 2, fixes "quirks" associated with Scratch 2 SVGs,
             const fixedSvgString = serializeSvgToString(loadSvgString(svgString, true /* fromVersion2 */));
 
             // If the string changed, put back into storage
@@ -35,10 +35,12 @@ const loadVector_ = function (costume, runtime, rotationCenter, optVersion) {
         }
 
         // createSVGSkin does the right thing if rotationCenter isn't provided, so it's okay if it's
-        // undefined here
-        costume.skinId = runtime.renderer.createSVGSkin(svgString, rotationCenter);
+            // undefined here
+                const deferTexture = optVersion !== 2 ?
+                    Boolean(runtime.renderer.twCanDeferVectorSkins && runtime.renderer.twCanDeferVectorSkins()) :
+                    false;
+        costume.skinId = runtime.renderer.createSVGSkin(svgString, rotationCenter, {deferTexture});
         costume.size = runtime.renderer.getSkinSize(costume.skinId);
-        // Now we should have a rotationCenter even if we didn't before
         if (!rotationCenter) {
             rotationCenter = runtime.renderer.getSkinRotationCenter(costume.skinId);
             costume.rotationCenterX = rotationCenter[0];
@@ -150,14 +152,14 @@ const _persistentReadImage = async asset => {
                 firstError = e;
             }
             log.warn(e);
-            await new Promise(resolve => setTimeout(resolve, Math.random() * 2000));
+            await new Promise(resolve => setTimeout(resolve, 200 * (i + 1)));
         }
     }
     throw firstError;
 };
 
 // Browsers break when we do too many createImageBitmap at the same time.
-const readImage = new AsyncLimiter(_persistentReadImage, 25);
+const readImage = new AsyncLimiter(_persistentReadImage, 32);
 
 /**
  * Return a promise to fetch a bitmap from storage and return it as a canvas

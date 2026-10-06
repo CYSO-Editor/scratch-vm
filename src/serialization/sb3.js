@@ -19,7 +19,6 @@ const VariableUtil = require('../util/variable-util');
 const compress = require('./tw-compress-sb3');
 
 const {loadCostume} = require('../import/load-costume.js');
-const {loadSound} = require('../import/load-sound.js');
 const {deserializeCostume, deserializeSound} = require('./deserialize-assets.js');
 
 const hasOwnProperty = Object.prototype.hasOwnProperty;
@@ -1112,36 +1111,37 @@ const parseScratchAssets = function (object, runtime, zip) {
         // we're always loading the 'sb3' representation of the costume
         // any translation that needs to happen will happen in the process
         // of building up the costume object into an sb3 format
-        return runtime.wrapAssetRequest(() => deserializeCostume(costume, runtime, zip)
-            .then(() => loadCostume(costumeMd5Ext, costume, runtime)));
+        return runtime.wrapAssetRequest(() => {
+            return deserializeCostume(costume, runtime, zip)
+                .then(() => loadCostume(costumeMd5Ext, costume, runtime));
+        });
         // Only attempt to load the costume after the deserialization
         // process has been completed
     });
     // Sounds from JSON
-    assets.soundPromises = (object.sounds || []).map(soundSource => {
-        const sound = {
-            assetId: soundSource.assetId,
-            format: soundSource.format,
-            rate: soundSource.rate,
-            sampleCount: soundSource.sampleCount,
-            name: soundSource.name,
-            // TODO we eventually want this property to be called md5ext,
-            // but there are many things relying on this particular name at the
-            // moment, so this translation is very important
-            md5: soundSource.md5ext,
-            dataFormat: soundSource.dataFormat,
-            data: null
-        };
+    assets.soundObjects = (object.sounds || []).map(soundSource => ({
+        assetId: soundSource.assetId,
+        format: soundSource.format,
+        rate: soundSource.rate,
+        sampleCount: soundSource.sampleCount,
+        name: soundSource.name,
+        // TODO we eventually want this property to be called md5ext,
+        // but there are many things relying on this particular name at the
+        // moment, so this translation is very important
+        md5: soundSource.md5ext,
+        dataFormat: soundSource.dataFormat,
+        data: null
+    }));
+    assets.soundPromises = assets.soundObjects.map(sound =>
         // deserializeSound should be called on the sound object we're
         // creating above instead of the source sound object, because this way
-        // we're always loading the 'sb3' representation of the costume
-        // any translation that needs to happen will happen in the process
-        // of building up the costume object into an sb3 format
-        return runtime.wrapAssetRequest(() => deserializeSound(sound, runtime, zip)
-            .then(() => loadSound(sound, runtime, assets.soundBank)));
-        // Only attempt to load the sound after the deserialization
+        // we're always loading the 'sb3' representation of the sound
+        runtime.wrapAssetRequest(() => {
+            return deserializeSound(sound, runtime, zip);
+        })
+        // Only attempt to extract the sound after the deserialization
         // process has been completed.
-    });
+    );
 
     return assets;
 };
@@ -1190,7 +1190,9 @@ const parseScratchObject = function (object, runtime, extensions, zip, assets) {
     // Costumes from JSON.
     const {costumePromises} = assets;
     // Sounds from JSON
-    const {soundBank, soundPromises} = assets;
+    const {soundBank, soundPromises, soundObjects} = assets;
+    sprite.sounds = soundObjects;
+    sprite.soundBank = soundBank || null;
     // Create the first clone, and load its run-state from JSON.
     const target = sprite.createClone(object.isStage ? StageLayering.BACKGROUND_LAYER : StageLayering.SPRITE_LAYER);
     // Load target properties from JSON.
@@ -1315,11 +1317,6 @@ const parseScratchObject = function (object, runtime, extensions, zip, assets) {
     }
     Promise.all(costumePromises).then(costumes => {
         sprite.costumes = costumes;
-    });
-    Promise.all(soundPromises).then(sounds => {
-        sprite.sounds = sounds;
-        // Make sure if soundBank is undefined, sprite.soundBank is then null.
-        sprite.soundBank = soundBank || null;
     });
     return Promise.all(costumePromises.concat(soundPromises)).then(() => target);
 };

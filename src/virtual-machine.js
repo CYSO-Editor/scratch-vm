@@ -472,7 +472,32 @@ class VirtualMachine extends EventEmitter {
             input = JSON.stringify(input);
         }
 
-        const validationPromise = new Promise((resolve, reject) => {
+        this.emit('CYSO_LOAD_PHASE', 'parse');
+
+        const runWorkerPath = () => {
+            if (!(input instanceof ArrayBuffer)) {
+                return Promise.resolve(null);
+            }
+            return require('./util/tw-zip-worker').unzipProject(input)
+                .then(({json: projectJsonString, files}) => {
+                    const validate = require('scratch-parser');
+                    return new Promise((resolve, reject) => {
+                        validate(projectJsonString, false, (error, res) => {
+                            if (error) {
+                                return reject(error);
+                            }
+                            const ZipStore = require('./util/tw-zip-store');
+                            resolve([res[0], new ZipStore(new Map(files.map(f => [f.name, f.data])))]);
+                        });
+                    });
+                })
+                .catch(error => {
+                    log.warn(`Worker unzip failed, falling back to main thread: ${error}`);
+                    return null;
+                });
+        };
+
+        const runMainThreadPath = () => new Promise((resolve, reject) => {
             const validate = require('scratch-parser');
             // The second argument of false below indicates to the validator that the
             // input should be parsed/validated as an entire project (and not a single sprite)
@@ -509,8 +534,15 @@ class VirtualMachine extends EventEmitter {
                 return Promise.reject(error);
             });
 
+        const validationPromise = runWorkerPath().then(workerResult => (
+            workerResult === null ? runMainThreadPath() : workerResult
+        ));
+
         return validationPromise
-            .then(validatedInput => this.deserializeProject(validatedInput[0], validatedInput[1]))
+            .then(validatedInput => {
+                this.emit('CYSO_LOAD_PHASE', 'assets');
+                return this.deserializeProject(validatedInput[0], validatedInput[1]);
+            })
             .then(() => this.runtime.handleProjectLoaded())
             .catch(error => {
                 // Intentionally rejecting here (want errors to be handled by caller)
@@ -881,10 +913,13 @@ class VirtualMachine extends EventEmitter {
             }
 
             // Update the VM user's knowledge of targets and blocks on the workspace.
+            this.emit('CYSO_LOAD_PHASE', 'build');
             this.emitTargetsUpdate(false /* Don't emit project change */);
             this.emitWorkspaceUpdate();
             this.runtime.setEditingTarget(this.editingTarget);
             this.runtime.ioDevices.cloud.setStage(this.runtime.getTargetForStage());
+
+            this.runtime.startDeferredSoundDecoding();
         });
     }
 

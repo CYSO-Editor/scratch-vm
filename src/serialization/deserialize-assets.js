@@ -1,5 +1,24 @@
 const JSZip = require('@turbowarp/jszip');
 const log = require('../util/log');
+const {findEntry} = require('../util/zip-lookup');
+
+const MD5EXT_PATTERN = /^[0-9a-f]{32}\./;
+
+const readZipFile = file => file.async('uint8array');
+
+const createAsset = (storage, assetType, dataFormat, data, trustedId, generateId) =>
+    storage.createAsset(assetType, dataFormat, data, trustedId, generateId);
+
+/**
+ * The id of an asset can only be trusted when it is a real content hash; sb2
+ * and malformed projects carry arbitrary names that must be re-hashed.
+ * @param {string} fileName entry name the asset was read from
+ * @param {string} [assetFileName] name supplied by sb2, which is never a hash
+ * @returns {?string}
+ */
+const trustedIdFor = (fileName, assetFileName) => (
+    !assetFileName && MD5EXT_PATTERN.test(fileName) ? fileName.substring(0, 32) : null
+);
 
 /**
  * Deserializes sound from file into storage cache so that it can
@@ -26,13 +45,7 @@ const deserializeSound = function (sound, runtime, zip, assetFileName) {
         return Promise.resolve(null);
     }
 
-    let soundFile = zip.file(fileName);
-    if (!soundFile) {
-        // look for assetfile in a flat list of files, or in a folder
-        const fileMatch = new RegExp(`^([^/]*/)?${fileName}$`);
-        soundFile = zip.file(fileMatch)[0]; // use first matching file
-    }
-
+    const soundFile = findEntry(zip, fileName);
     if (!soundFile) {
         log.error(`Could not find sound file associated with the ${sound.name} sound.`);
         return Promise.resolve(null);
@@ -43,14 +56,17 @@ const deserializeSound = function (sound, runtime, zip, assetFileName) {
         return Promise.resolve(null);
     }
 
-    const dataFormat = sound.dataFormat.toLowerCase() === 'mp3' ?
+    const declaredFormat = typeof sound.dataFormat === 'string' ? sound.dataFormat.toLowerCase() : '';
+    const dataFormat = declaredFormat === 'mp3' ?
         storage.DataFormat.MP3 : storage.DataFormat.WAV;
-    return soundFile.async('uint8array').then(data => storage.createAsset(
+    const trustedId = trustedIdFor(fileName, assetFileName);
+    return readZipFile(soundFile).then(data => createAsset(
+        storage,
         storage.AssetType.Sound,
         dataFormat,
         data,
-        null,
-        true
+        trustedId,
+        !trustedId
     ))
         .then(asset => {
             sound.asset = asset;
@@ -106,26 +122,25 @@ const deserializeCostume = function (costume, runtime, zip, assetFileName, textL
         return Promise.resolve(null);
     }
 
-    let costumeFile = zip.file(fileName);
-    if (!costumeFile) {
-        // look for assetfile in a flat list of files, or in a folder
-        const fileMatch = new RegExp(`^([^/]*/)?${fileName}$`);
-        costumeFile = zip.file(fileMatch)[0]; // use the first matched file
-    }
-
+    const costumeFile = findEntry(zip, fileName);
     if (!costumeFile) {
         log.error(`Could not find costume file associated with the ${costume.name} costume.`);
         return Promise.resolve(null);
     }
+
+    const costumeFormat = typeof costume.dataFormat === 'string' ? costume.dataFormat.toLowerCase() : '';
     let assetType = null;
-    const costumeFormat = costume.dataFormat.toLowerCase();
     if (costumeFormat === 'svg') {
         assetType = storage.AssetType.ImageVector;
     } else if (['png', 'bmp', 'jpeg', 'jpg', 'gif'].indexOf(costumeFormat) >= 0) {
         assetType = storage.AssetType.ImageBitmap;
     } else {
+        // Without a type the renderer would receive an unusable asset; skipping
+        // leaves the costume absent, which the runtime already tolerates.
         log.error(`Unexpected file format for costume: ${costumeFormat}`);
+        return Promise.resolve(null);
     }
+
     if (!JSZip.support.uint8array) {
         log.error('JSZip uint8array is not supported in this browser.');
         return Promise.resolve(null);
@@ -135,13 +150,14 @@ const deserializeCostume = function (costume, runtime, zip, assetFileName, textL
     // that was opened in Scratch 2.0. In this case, set costume.textLayerAsset.
     let textLayerFilePromise;
     if (costume.textLayerMD5) {
-        const textLayerFile = zip.file(textLayerFileName);
+        const textLayerFile = findEntry(zip, textLayerFileName);
         if (!textLayerFile) {
             log.error(`Could not find text layer file associated with the ${costume.name} costume.`);
             return Promise.resolve(null);
         }
-        textLayerFilePromise = textLayerFile.async('uint8array')
-            .then(data => storage.createAsset(
+        textLayerFilePromise = readZipFile(textLayerFile)
+            .then(data => createAsset(
+                storage,
                 storage.AssetType.ImageBitmap,
                 'png',
                 data,
@@ -154,15 +170,17 @@ const deserializeCostume = function (costume, runtime, zip, assetFileName, textL
         textLayerFilePromise = Promise.resolve(null);
     }
 
+    const trustedId = trustedIdFor(fileName, assetFileName);
     return Promise.all([textLayerFilePromise,
-        costumeFile.async('uint8array')
-            .then(data => storage.createAsset(
+        readZipFile(costumeFile)
+            .then(data => createAsset(
+                storage,
                 assetType,
                 // TODO eventually we want to map non-png's to their actual file types?
                 costumeFormat,
                 data,
-                null,
-                true
+                trustedId,
+                !trustedId
             ))
             .then(asset => {
                 costume.asset = asset;

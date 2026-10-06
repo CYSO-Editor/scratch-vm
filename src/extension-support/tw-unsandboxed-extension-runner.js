@@ -297,8 +297,43 @@ const loadUnsandboxedExtension = (extensionURL, vm) => new Promise((resolve, rej
     script.onerror = () => {
         reject(new Error(`Error in unsandboxed script ${extensionURL}. Check the console for more information.`));
     };
-    script.src = extensionURL;
-    document.body.appendChild(script);
+    const loadTimeout = setTimeout(() => {
+        script.remove();
+        reject(new Error(`Timed out loading unsandboxed extension ${extensionURL}`));
+    }, 20000);
+    script.addEventListener('load', () => clearTimeout(loadTimeout), {once: true});
+    let started = false;
+    const startLoading = src => {
+        if (started) return;
+        started = true;
+        script.src = src;
+        document.body.appendChild(script);
+    };
+    let cachePromise = null;
+    if (typeof window !== 'undefined' && window.__cysoExtensionCache &&
+        typeof window.__cysoExtensionCache.get === 'function') {
+        try {
+            cachePromise = Promise.resolve(window.__cysoExtensionCache.get(extensionURL));
+        } catch (e) {
+            cachePromise = null;
+        }
+    }
+    if (cachePromise) {
+        // The script must ALWAYS start loading, even if the cache never
+        // answers: race the cache against a short timeout.
+        const timeout = new Promise(resolve => setTimeout(() => resolve(null), 3000));
+        Promise.race([cachePromise.catch(() => null), timeout]).then(cached => {
+            if (cached && typeof cached.content === 'string') {
+                const blobURL = URL.createObjectURL(new Blob([cached.content], {type: 'text/javascript'}));
+                script.addEventListener('load', () => URL.revokeObjectURL(blobURL), {once: true});
+                startLoading(blobURL);
+            } else {
+                startLoading(extensionURL);
+            }
+        });
+    } else {
+        startLoading(extensionURL);
+    }
 }).then(objects => {
     teardownUnsandboxedExtensionAPI();
     return objects;

@@ -1,4 +1,5 @@
 const StringUtil = require('./string-util');
+const {findEntry} = require('./zip-lookup');
 
 class AssetUtil {
     /**
@@ -11,18 +12,13 @@ class AssetUtil {
     static getByMd5ext (runtime, zip, assetType, md5ext) {
         const idParts = StringUtil.splitFirst(md5ext, '.');
         const md5 = idParts[0];
-        const ext = idParts[1].toLowerCase();
+        const ext = (idParts[1] || '').toLowerCase();
 
-        if (zip) {
-            // Search the root of the zip
-            let file = zip.file(md5ext);
-
-            // Search subfolders of the zip
-            // This matches behavior of deserialize-assets.js
-            if (!file) {
-                const fileMatch = new RegExp(`^([^/]*/)?${md5ext}$`);
-                file = zip.file(fileMatch)[0];
-            }
+        // createAsset refuses to build an asset without a format, and storage
+        // can pick the default one, so bare names go straight to storage.
+        if (zip && ext) {
+            // Look at the root of the zip first, then one folder deep.
+            const file = findEntry(zip, md5ext);
 
             if (file) {
                 return runtime.wrapAssetRequest(() => file.async('uint8array').then(data => runtime.storage.createAsset(

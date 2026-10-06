@@ -177,14 +177,32 @@ class Scratch3SoundBlocks {
         if (index >= 0) {
             const {target} = util;
             const {sprite} = target;
-            const {soundId} = sprite.sounds[index];
-            if (sprite.soundBank) {
+            const sound = sprite.sounds[index];
+            if (!sound) return;
+            const {soundId} = sound;
+            if (sprite.soundBank && typeof soundId !== 'undefined' &&
+                sprite.soundBank.getSoundPlayer(soundId)) {
                 if (storeWaiting === STORE_WAITING) {
                     this._addWaitingSound(target.id, soundId);
                 } else {
                     this._removeWaitingSound(target.id, soundId);
                 }
                 return sprite.soundBank.playSound(target, soundId);
+            }
+            if (sprite.soundBank) {
+                return this.runtime.decodeSoundNow(sound, sprite.soundBank).then(() => {
+                    const decodedId = sound.soundId;
+                    if (typeof decodedId === 'undefined' ||
+                        !sprite.soundBank.getSoundPlayer(decodedId)) {
+                        return null;
+                    }
+                    if (storeWaiting === STORE_WAITING) {
+                        this._addWaitingSound(target.id, decodedId);
+                    } else {
+                        this._removeWaitingSound(target.id, decodedId);
+                    }
+                    return sprite.soundBank.playSound(target, decodedId);
+                });
             }
         }
     }

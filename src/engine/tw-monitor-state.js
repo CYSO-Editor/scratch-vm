@@ -90,6 +90,14 @@ class MonitorState {
     }
 
     /**
+     * For compatibility with immutable.js and Map.
+     * @returns {IterableIterator<string>}
+     */
+    keys () {
+        return this.map.keys();
+    }
+
+    /**
      * @returns {MonitorRecord[]}
      */
     values () {
