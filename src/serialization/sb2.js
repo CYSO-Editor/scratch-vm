@@ -507,6 +507,7 @@ const parseScratchAssets = function (object, runtime, topLevel, zip) {
     }
     // Sounds from JSON
     const soundObjects = [];
+    const soundPromises = assets.soundPromises;
     if (Object.prototype.hasOwnProperty.call(object, 'sounds')) {
         for (let s = 0; s < object.sounds.length; s++) {
             const soundSource = object.sounds[s];

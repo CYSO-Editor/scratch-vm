@@ -830,8 +830,7 @@ class VirtualMachine extends EventEmitter {
                     if (this.runtime.cysoCoreEnabled && /cyso[\W_]{0,3}core/i.test(extensionID)) {
                         continue;
                     }
-                    log.warn(`Unknown extension, skipping: ${extensionID}`);
-                    continue;
+                    throw new Error(`Unknown extension: ${extensionID}`);
                 }
                 
                 // 收集URL和对应的扩展ID
@@ -840,7 +839,7 @@ class VirtualMachine extends EventEmitter {
             }
         }
         
-        if (urlsToCheck.length > 1 && this.securityManager.batchLoadExtensions) {
+        if (urlsToCheck.length >= 1 && this.securityManager.batchLoadExtensions) {
             const allowedResults = await this.securityManager.batchLoadExtensions(urlsToCheck);
 
             urlsToCheck.forEach((url, index) => {

@@ -1975,9 +1975,9 @@ class Runtime extends EventEmitter {
                 if (seen.has(costume)) continue;
                 seen.add(costume);
                 if (typeof costume.skinId !== 'number' || costume.skinId < 0) continue;
+                if (!costume.md5) continue;
                 const oldSkinId = costume.skinId;
                 costume.skinId = null;
-                if (!costume.md5) continue;
                 promises.push(loadCostume(costume.md5, costume, this).then(() => {
                     // Destroy the dead skin only after the replacement exists,
                     // so drawables never point at a destroyed skin.

@@ -98,7 +98,10 @@ const unzipProject = arrayBuffer => new Promise((resolve, reject) => {
         reject,
         timer: setTimeout(() => {
             pending.delete(id);
-            reject(new Error('zip worker timed out'));
+            const error = new Error('zip worker timed out');
+            reject(error);
+            failAllPending(error);
+            disposeWorker();
         }, WORKER_TIMEOUT)
     };
     pending.set(id, entry);
