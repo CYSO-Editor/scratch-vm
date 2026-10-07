@@ -14,6 +14,14 @@ const base = {
         library: 'VirtualMachine',
         filename: '[name].js'
     },
+    resolve: {
+        alias: {
+            // @turbowarp/scratch-svg-renderer's font-inliner.js does a plain
+            // require('scratch-render-fonts') and needs the woff2 fonts that ship with
+            // scratch-gui. Point at that copy so no vendored local-deps/ is needed.
+            'scratch-render-fonts': path.resolve(__dirname, '../scratch-gui/src/lib/tw-scratch-render-fonts')
+        }
+    },
     module: {
         rules: [{
             test: /\.js$/,
@@ -29,6 +37,11 @@ const base = {
             options: {
                 outputPath: 'media/music/'
             }
+        },
+        {
+            // tw-scratch-render-fonts requires the woff2 files directly.
+            test: /\.woff2$/,
+            loader: 'url-loader'
         }]
     },
     plugins: []
@@ -100,7 +113,11 @@ module.exports = [
                     loader: 'script-loader'
                 },
                 {
-                    test: require.resolve('scratch-blocks/dist/vertical.js'),
+                    // Use the shim entry rather than dist/vertical.js: dist is a build artifact
+                    // (gitignored in scratch-blocks) and is not present after a fresh clone, which
+                    // broke this build. shim/vertical.js is the same entry scratch-gui aliases to
+                    // and resolves through the committed shim/ chain.
+                    test: require.resolve('scratch-blocks/shim/vertical.js'),
                     loader: 'expose-loader?Blockly'
                 },
                 {
