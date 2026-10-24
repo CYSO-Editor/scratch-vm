@@ -494,14 +494,18 @@ class Blocks {
                 this.emitProjectChanged();
             }
             break;
-        case 'var_rename':
-            if (editingTarget && Object.prototype.hasOwnProperty.call(editingTarget.variables, e.varId)) {
+        case 'var_rename': {
+            const isLocalVariable = Boolean(editingTarget) && !editingTarget.isStage &&
+                Object.prototype.hasOwnProperty.call(editingTarget.variables, e.varId);
+            const isGlobalVariable = !isLocalVariable && Boolean(stage) &&
+                Object.prototype.hasOwnProperty.call(stage.variables, e.varId);
+            if (isLocalVariable) {
                 // This is a local variable, rename on the current target
                 editingTarget.renameVariable(e.varId, e.newName);
                 // Update all the blocks on the current target that use
                 // this variable
                 editingTarget.blocks.updateBlocksAfterVarRename(e.varId, e.newName);
-            } else {
+            } else if (isGlobalVariable) {
                 // This is a global variable
                 stage.renameVariable(e.varId, e.newName);
                 // Update all blocks on all targets that use the renamed variable
@@ -513,6 +517,7 @@ class Blocks {
             }
             this.emitProjectChanged();
             break;
+        }
         case 'var_delete': {
             this.resetCache(); // tw: more aggressive cache resetting
             const target = (editingTarget && Object.prototype.hasOwnProperty.call(editingTarget.variables, e.varId)) ?
@@ -687,7 +692,17 @@ class Blocks {
             if (args.name === 'VARIABLE' || args.name === 'LIST' ||
                 args.name === 'BROADCAST_OPTION') {
                 // Get variable name using the id in args.value.
-                const variable = this.runtime.getEditingTarget().lookupVariableById(args.value);
+                const editingTarget = this.runtime.getEditingTarget();
+                let variable = editingTarget ? editingTarget.lookupVariableById(args.value) : null;
+                if (!variable) {
+                    const targets = this.runtime.targets || [];
+                    for (let i = 0; i < targets.length; i++) {
+                        if (Object.prototype.hasOwnProperty.call(targets[i].variables, args.value)) {
+                            variable = targets[i].variables[args.value];
+                            break;
+                        }
+                    }
+                }
                 if (variable) {
                     block.fields[args.name].value = variable.name;
                     block.fields[args.name].id = args.value;
@@ -780,7 +795,9 @@ class Blocks {
                         params: this._getBlockParams(block),
                         // @todo(vm#565) for numerical values with decimals, some countries use comma
                         value: '',
-                        mode: block.opcode === 'data_listcontents' ? 'list' : 'default'
+                        mode: block.opcode === 'data_listcontents' ? 'list' : 'default',
+                        width: block.opcode === 'data_listcontents' ? 100 : 0,
+                        height: block.opcode === 'data_listcontents' ? 200 : 0
                     }));
                 }
             }

@@ -400,6 +400,9 @@ class Target extends EventEmitter {
         }
         for (const blockId of targetSpecificMonitorBlockIds) {
             this.runtime.monitorBlocks.deleteBlock(blockId);
+            if (this.isStage) {
+                this.runtime.requestRemoveMonitor(blockId);
+            }
         }
     }
 
