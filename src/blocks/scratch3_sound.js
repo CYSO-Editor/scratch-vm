@@ -180,8 +180,9 @@ class Scratch3SoundBlocks {
             const sound = sprite.sounds[index];
             if (!sound) return;
             const {soundId} = sound;
-            if (sprite.soundBank && typeof soundId !== 'undefined' &&
-                sprite.soundBank.getSoundPlayer(soundId)) {
+            const soundPlayer = sprite.soundBank && typeof sprite.soundBank.getSoundPlayer === 'function' ?
+                sprite.soundBank.getSoundPlayer(soundId) : true;
+            if (sprite.soundBank && typeof soundId !== 'undefined' && soundPlayer) {
                 if (storeWaiting === STORE_WAITING) {
                     this._addWaitingSound(target.id, soundId);
                 } else {
@@ -192,8 +193,9 @@ class Scratch3SoundBlocks {
             if (sprite.soundBank) {
                 return this.runtime.decodeSoundNow(sound, sprite.soundBank).then(() => {
                     const decodedId = sound.soundId;
-                    if (typeof decodedId === 'undefined' ||
-                        !sprite.soundBank.getSoundPlayer(decodedId)) {
+                    const decodedPlayer = typeof sprite.soundBank.getSoundPlayer === 'function' ?
+                        sprite.soundBank.getSoundPlayer(decodedId) : true;
+                    if (typeof decodedId === 'undefined' || !decodedPlayer) {
                         return null;
                     }
                     if (storeWaiting === STORE_WAITING) {

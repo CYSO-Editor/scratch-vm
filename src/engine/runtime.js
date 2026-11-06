@@ -24,6 +24,7 @@ const fetchWithTimeout = require('../util/fetch-with-timeout');
 const platform = require('./tw-platform.js');
 const safeStringify = require('../util/tw-safe-stringify.js');
 const MonitorState = require('./tw-monitor-state.js');
+const Sampler = require('./tw-sampler.js');
 
 // Virtual I/O devices.
 const Clock = require('../io/clock');
@@ -382,10 +383,18 @@ class Runtime extends EventEmitter {
 
         /**
          * A runtime profiler that records timed events for later playback to
-         * diagnose Scratch performance.
+         * diagnose Scratch performance. This uses an instrumentation approach
+         * and gathers limited data. The sampler is more useful for analyzing
+         * performance on a per-block basis.
          * @type {Profiler}
          */
         this.profiler = null;
+
+        /**
+         * Sampling profiler.
+         * @type {Sampler}
+         */
+        this.sampler = new Sampler(this);
 
         this.cloudOptions = {
             limit: 10
@@ -2221,7 +2230,11 @@ class Runtime extends EventEmitter {
         // Remove any existing thread.
         for (let i = 0; i < this.threads.length; i++) {
             // Toggling a script that's already running turns it off
-            if (this.threads[i].topBlock === topBlockId && this.threads[i].status !== Thread.STATUS_DONE) {
+            if (
+                this.threads[i].target === opts.target &&
+                this.threads[i].topBlock === topBlockId &&
+                this.threads[i].status !== Thread.STATUS_DONE
+            ) {
                 const blockContainer = opts.target.blocks;
                 const opcode = blockContainer.getOpcode(blockContainer.getBlock(topBlockId));
 
@@ -2623,7 +2636,9 @@ class Runtime extends EventEmitter {
         interpolate.interpolate(this, progressInFrame);
 
         if (this.renderer) {
+            if (this.sampler.enableBasic) this.sampler.pc[0] = Sampler.RENDERER;
             this.renderer.draw();
+            if (this.sampler.enableBasic) this.sampler.pc[0] = Sampler.IDLE;
         }
     }
 
@@ -2641,6 +2656,8 @@ class Runtime extends EventEmitter {
      * inactive threads after each iteration.
      */
     _step () {
+        if (this.sampler.enableBasic) this.sampler.pc[0] = Sampler.RUNTIME;
+
         if (this.interpolationEnabled) {
             interpolate.setupInitialState(this);
         }
@@ -2699,7 +2716,9 @@ class Runtime extends EventEmitter {
             // Checking for the animation frame loop is more reliable than using
             // interpolationEnabled in some edge cases
             if (!document.hidden && !this.frameLoop._interpolationAnimation) {
+                if (this.sampler.enableBasic) this.sampler.pc[0] = Sampler.RENDERER;
                 this.renderer.draw();
+                if (this.sampler.enableBasic) this.sampler.pc[0] = Sampler.RUNTIME;
             }
             if (this.profiler !== null) {
                 this.profiler.stop();
@@ -2724,6 +2743,8 @@ class Runtime extends EventEmitter {
         if (this.interpolationEnabled) {
             this._lastStepTime = Date.now();
         }
+
+        if (this.sampler.enableBasic) this.sampler.pc[0] = Sampler.IDLE;
     }
 
     /**
@@ -2744,6 +2765,10 @@ class Runtime extends EventEmitter {
      * Queue monitor blocks to sequencer to be run.
      */
     _pushMonitors () {
+        if (this.targets.length === 0) {
+            // Project is not loaded yet, but monitors might be. Don't try to start anything.
+            return;
+        }
         this.monitorBlocks.runAllMonitored(this);
     }
 
@@ -2899,6 +2924,7 @@ class Runtime extends EventEmitter {
      * @param {string} options.procedureCode The ID of the block
      * @param {function} options.callback The callback, called with (args, BlockUtility). May return a promise.
      * @param {string[]} [options.arguments] Names of the arguments accepted. Optional if no arguments.
+     * @param {string[]} [options.argumentDefaults] Default values of the arguments.
      * @param {boolean} [options.hidden] True to not include this block in the block palette
      * @param {1|2} [options.return] 1 for round reporter, 2 for boolean reported, leave empty for statement.
      */
@@ -2908,7 +2934,10 @@ class Runtime extends EventEmitter {
         const argumentNames = options.arguments || [];
         const names = argumentNames;
         const ids = argumentNames.map((_, i) => `arg${i}`);
-        const defaults = argumentNames.map(() => '');
+        const argumentDefaults = options.argumentDefaults || [];
+        const defaults = argumentNames.map((_, i) => (
+            typeof argumentDefaults[i] === 'undefined' ? '' : `${argumentDefaults[i]}`
+        ));
         this.addonBlocks[procedureCode] = {
             namesIdsDefaults: [names, ids, defaults],
             ...options
@@ -2937,6 +2966,18 @@ class Runtime extends EventEmitter {
                 };
                 this._blockInfo.unshift(blockInfo);
             }
+
+            const argumentTypes = procedureCode.match(/%[nbs]/g) || [];
+            const shadows = argumentTypes.map((type, i) => {
+                if (defaults[i] === '' || (type !== '%s' && type !== '%n')) {
+                    return '';
+                }
+                const shadowType = type === '%n' ? 'math_number' : 'text';
+                const fieldName = type === '%n' ? 'NUM' : 'TEXT';
+                return `<value name="${xmlEscape(ids[i])}"><shadow type="${shadowType}">` +
+                    `<field name="${fieldName}">${xmlEscape(defaults[i])}</field></shadow></value>`;
+            }).join('');
+
             blockInfo.blocks.push({
                 info: {},
                 xml:
@@ -2946,7 +2987,7 @@ class Runtime extends EventEmitter {
                     ` argumentids="${xmlEscape(JSON.stringify(ids))}"` +
                     ` argumentdefaults="${xmlEscape(JSON.stringify(defaults))}"` +
                     `${options.return ? ` return="${xmlEscape(options.return.toString())}"` : ''}` +
-                    '></mutation></block>'
+                    `></mutation>${shadows}</block>`
             });
         }
 
@@ -3518,7 +3559,7 @@ class Runtime extends EventEmitter {
         const varType = (typeof optVarType === 'string') ? optVarType : Variable.SCALAR_TYPE;
         const allVariableNames = this.getAllVarNamesOfType(varType);
         const newName = StringUtil.unusedName(variableName, allVariableNames);
-        const variable = new Variable(optVarId || uid(), newName, varType);
+        const variable = Variable.create(optVarId || uid(), newName, varType);
         const stage = this.getTargetForStage();
         stage.variables[variable.id] = variable;
         return variable;

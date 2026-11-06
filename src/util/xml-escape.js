@@ -15,8 +15,8 @@ const xmlEscape = function (unsafe) {
             // See #1030
             unsafe = String(unsafe);
         } else {
-            log.warn('replaceUnsafeChars received non-string input, coercing to String:', unsafe);
-            unsafe = String(unsafe);
+            log.error('Unexpected input recieved in replaceUnsafeChars');
+            return unsafe;
         }
     }
     return unsafe.replace(/[<>&'"]/g, c => {

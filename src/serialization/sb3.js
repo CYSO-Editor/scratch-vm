@@ -27,6 +27,7 @@ const hasOwnProperty = Object.prototype.hasOwnProperty;
  * @typedef {object} ImportedProject
  * @property {Array.<Target>} targets - the imported Scratch 3.0 target objects.
  * @property {ImportedExtensionsInfo} extensions - the ID of each extension actually used by this project.
+ * @property {number[]} layerOrder the layer order of each target, in the same order as targets.
  */
 
 /**
@@ -480,38 +481,6 @@ const serializeSound = function (sound) {
     return obj;
 };
 
-// Using some bugs, it can be possible to get values like undefined, null, or complex objects into
-// variables or lists. This will cause make the project unusable after exporting without JSON editing
-// as it will fail validation in scratch-parser.
-// To avoid this, we'll convert those objects to strings before saving them.
-const isVariableValueSafeForJSON = value => (
-    typeof value === 'number' ||
-    typeof value === 'string' ||
-    typeof value === 'boolean'
-);
-const makeSafeForJSON = value => {
-    if (Array.isArray(value)) {
-        let copy = null;
-        for (let i = 0; i < value.length; i++) {
-            if (!isVariableValueSafeForJSON(value[i])) {
-                if (!copy) {
-                    // Only copy the list when needed
-                    copy = value.slice();
-                }
-                copy[i] = `${copy[i]}`;
-            }
-        }
-        if (copy) {
-            return copy;
-        }
-        return value;
-    }
-    if (isVariableValueSafeForJSON(value)) {
-        return value;
-    }
-    return `${value}`;
-};
-
 /**
  * Serialize the given variables object.
  * @param {object} variables The variables to be serialized.
@@ -533,12 +502,12 @@ const serializeVariables = function (variables) {
             continue;
         }
         if (v.type === Variable.LIST_TYPE) {
-            obj.lists[varId] = [v.name, makeSafeForJSON(v.value)];
+            obj.lists[varId] = [v.name, v.value];
             continue;
         }
 
         // otherwise should be a scalar type
-        obj.variables[varId] = [v.name, makeSafeForJSON(v.value)];
+        obj.variables[varId] = [v.name, v.value];
         // only scalar vars have the potential to be cloud vars
         if (v.isCloud) obj.variables[varId].push(true);
     }
@@ -1147,6 +1116,54 @@ const parseScratchAssets = function (object, runtime, zip) {
 };
 
 /**
+ * Fix various backwards-incompatible changes that Scratch made in the spork migration.
+ * @param {object} blocks Blocks, mutated in-place.
+ */
+const fixSporkCompatibility = function (blocks) {
+    for (const blockId in blocks) {
+        if (!Object.prototype.hasOwnProperty.call(blocks, blockId)) continue;
+
+        const block = blocks[blockId];
+        const opcode = block.opcode;
+
+        switch (opcode) {
+        // Custom block definition prototype blocks used to be marked as shadow: true, but spork marks as shadow: false.
+        // Our scratch-blocks relies on it being shadow: true to prevent moving, so we'll force it to be that way.
+        case 'procedures_prototype':
+            block.shadow = true;
+            break;
+
+        // For completeness with the above, set the argument reporter generators to be shadow: true as well.
+        case 'argument_reporter_string_number':
+        case 'argument_reporter_boolean': {
+            const parent = blocks[block.parent];
+            if (parent && parent.opcode === 'procedures_prototype') {
+                block.shadow = true;
+            }
+            break;
+        }
+
+        // control_stop used to define a mutation for whether it has a connection below, which is what old
+        // scratch-blocks relies on to determine if there is another conneciton below or not. Spork does not define
+        // this mutation and relies only on the STOP_OPTION field. We will generate the mutation if it's missing so
+        // that a "stop other scripts in sprite" block doesn't cause the workspace to fail to load.
+        case 'control_stop': {
+            if (!block.mutation) {
+                const stopOption = block.fields?.STOP_OPTION?.value;
+                const hasNext = stopOption === 'other scripts in sprite' || stopOption === 'other scripts in stage';
+                block.mutation = {
+                    tagName: 'mutation',
+                    hasnext: hasNext ? 'true' : 'false',
+                    children: []
+                };
+            }
+            break;
+        }
+        }
+    }
+};
+
+/**
  * Parse a single "Scratch object" and create all its in-memory VM objects.
  * @param {!object} object From-JSON "Scratch object:" sprite, stage, watcher.
  * @param {!Runtime} runtime Runtime object to load all structures into.
@@ -1186,6 +1203,8 @@ const parseScratchObject = function (object, runtime, extensions, zip, assets) {
                 extensions.extensionIDs.add(extensionID);
             }
         }
+        // Take a third pass to fix various things that spork broke.
+        fixSporkCompatibility(object.blocks);
     }
     // Costumes from JSON.
     const {costumePromises} = assets;
@@ -1220,7 +1239,7 @@ const parseScratchObject = function (object, runtime, extensions, zip, assets) {
             // - the runtime can support another cloud variable
             const isCloud = (variable.length === 3) && variable[2] &&
                 object.isStage && runtime.canAddCloudVariable();
-            const newVariable = new Variable(
+            const newVariable = Variable.create(
                 varId, // var id is the index of the variable desc array in the variables obj
                 variable[0], // name of the variable
                 Variable.SCALAR_TYPE, // type of the variable
@@ -1234,7 +1253,7 @@ const parseScratchObject = function (object, runtime, extensions, zip, assets) {
     if (Object.prototype.hasOwnProperty.call(object, 'lists')) {
         for (const listId in object.lists) {
             const list = object.lists[listId];
-            const newList = new Variable(
+            const newList = Variable.create(
                 listId,
                 list[0],
                 Variable.LIST_TYPE,
@@ -1247,7 +1266,7 @@ const parseScratchObject = function (object, runtime, extensions, zip, assets) {
     if (Object.prototype.hasOwnProperty.call(object, 'broadcasts')) {
         for (const broadcastId in object.broadcasts) {
             const broadcast = object.broadcasts[broadcastId];
-            const newBroadcast = new Variable(
+            const newBroadcast = Variable.create(
                 broadcastId,
                 broadcast,
                 Variable.BROADCAST_MESSAGE_TYPE,
@@ -1302,12 +1321,6 @@ const parseScratchObject = function (object, runtime, extensions, zip, assets) {
     }
     if (Object.prototype.hasOwnProperty.call(object, 'isStage')) {
         target.isStage = object.isStage;
-    }
-    if (Object.prototype.hasOwnProperty.call(object, 'targetPaneOrder')) {
-        // Temporarily store the 'targetPaneOrder' property
-        // so that we can correctly order sprites in the target pane.
-        // This will be deleted after we are done parsing and ordering the targets list.
-        target.targetPaneOrder = object.targetPaneOrder;
     }
     if (Object.prototype.hasOwnProperty.call(object, 'draggable')) {
         target.draggable = object.draggable;
@@ -1388,7 +1401,9 @@ const deserializeMonitor = function (monitorData, runtime, targets, extensions) 
 
     // If the runtime already has a monitor block for this monitor's id,
     // update the existing block with the relevant monitor information.
-    const existingMonitorBlock = runtime.monitorBlocks._blocks[monitorData.id];
+    const existingMonitorBlock = hasOwnProperty.call(runtime.monitorBlocks._blocks, monitorData.id) ?
+        runtime.monitorBlocks._blocks[monitorData.id] :
+        null;
     if (existingMonitorBlock) {
         // A monitor block already exists if the toolbox has been loaded and
         // the monitor block is not target specific (because the block gets recycled).
@@ -1546,6 +1561,8 @@ const deserialize = async function (json, runtime, zip, isSingleSprite) {
 
     const monitorObjects = json.monitors || [];
 
+    let layerOrder;
+
     return fontPromise.then(() => targetObjects.map(target => parseScratchAssets(target, runtime, zip)))
         // Force this promise to wait for the next loop in the js tick. Let
         // storage have some time to send off asset requests.
@@ -1553,21 +1570,18 @@ const deserialize = async function (json, runtime, zip, isSingleSprite) {
         .then(assets => Promise.all(targetObjects
             .map((target, index) =>
                 parseScratchObject(target, runtime, extensions, zip, assets[index]))))
-        .then(targets => targets // Re-sort targets back into original sprite-pane ordering
-            .map((t, i) => {
-                // Add layer order property to deserialized targets.
-                // This property is used to initialize executable targets in
-                // the correct order and is deleted in VM's installTargets function
-                t.layerOrder = i;
-                return t;
-            })
-            .sort((a, b) => a.targetPaneOrder - b.targetPaneOrder)
-            .map(t => {
-                // Delete the temporary properties used for
-                // sprite pane ordering and stage layer ordering
-                delete t.targetPaneOrder;
-                return t;
-            }))
+        .then(targets => {
+            // Re-sort targets back into original sprite-pane ordering.
+            const reordered = targets
+                .map((target, index) => ({
+                    target,
+                    layerOrder: index,
+                    targetPaneOrder: targetObjects[index].targetPaneOrder
+                }))
+                .sort((a, b) => a.targetPaneOrder - b.targetPaneOrder);
+            layerOrder = reordered.map(i => i.layerOrder);
+            return reordered.map(i => i.target);
+        })
         .then(targets => replaceUnsafeCharsInVariableIds(targets))
         .then(targets => {
             monitorObjects.map(monitorDesc => deserializeMonitor(monitorDesc, runtime, targets, extensions));
@@ -1578,7 +1592,8 @@ const deserialize = async function (json, runtime, zip, isSingleSprite) {
         })
         .then(targets => ({
             targets,
-            extensions
+            extensions,
+            layerOrder
         }));
 };
 

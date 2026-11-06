@@ -3,6 +3,7 @@ const createScratchX = require('./tw-scratchx-compatibility-layer');
 const AsyncLimiter = require('../util/async-limiter');
 const createTranslate = require('./tw-l10n');
 const staticFetch = require('../util/tw-static-fetch');
+const loadScriptElement = require('./tw-load-script-element');
 
 let currentExtensionId = null;
 const usedExtensionIds = new Set();
@@ -31,9 +32,6 @@ const allocateExtensionId = (baseId) => {
 };
 
 const getCurrentExtensionId = () => currentExtensionId;
-const setCurrentExtensionId = id => {
-    currentExtensionId = id;
-};
 
 const setCurrentExtensionInfo = (id) => {
     currentExtensionId = id;
@@ -107,27 +105,28 @@ const setupUnsandboxedExtensionAPI = vm => new Promise(resolve => {
     claimRuntimeToken();
 
     const extensionObjects = [];
-    
+
     const register = (extensionObject, declaredPermissions = null) => {
         extensionObjects.push(extensionObject);
-        const info = extensionObject.getInfo();
+
+        const info = typeof extensionObject.getInfo === 'function' ? extensionObject.getInfo() : null;
         if (info && info.id) {
             const extId = allocateExtensionId(info.id);
             info.id = extId;
             const extName = info.name || extId;
             const permissions = declaredPermissions || info.permissions || [];
-            
-        setCurrentExtensionInfo(extId, extName, permissions);
 
-        tagExtensionBlocks(extensionObject, info, extId);
-        
-        if (vm.securityManager.registerExtension) {
-          vm.securityManager.registerExtension(extId, extName, permissions);
-        }
+            setCurrentExtensionInfo(extId);
+            tagExtensionBlocks(extensionObject, info, extId);
 
-        if (typeof EditorPreload !== 'undefined' && typeof EditorPreload.registerExtensionPermissions === 'function') {
-          EditorPreload.registerExtensionPermissions(runtimeToken, extId, permissions, extName).catch(() => {});
-        }
+            if (vm.securityManager.registerExtension) {
+                vm.securityManager.registerExtension(extId, extName, permissions);
+            }
+            if (typeof EditorPreload !== 'undefined' &&
+                typeof EditorPreload.registerExtensionPermissions === 'function') {
+                EditorPreload.registerExtensionPermissions(runtimeToken, extId, permissions, extName)
+                    .catch(() => {});
+            }
         }
         resolve(extensionObjects);
     };
@@ -204,6 +203,11 @@ const setupUnsandboxedExtensionAPI = vm => new Promise(resolve => {
     Scratch.canEmbed = wrapWithExtensionId(async url => {
         const parsed = parseURL(url);
         if (!parsed) {
+            return false;
+        }
+        // Embedding javascript: can execute code in the embedding page's origin.
+        // eslint-disable-next-line no-script-url
+        if (parsed.protocol === 'javascript:') {
             return false;
         }
         return vm.securityManager.canEmbed(parsed.href);
@@ -284,6 +288,9 @@ const teardownUnsandboxedExtensionAPI = () => {
     };
 };
 
+const EXTENSION_LOAD_TIMEOUT_MS = 20000;
+const EXTENSION_CACHE_TIMEOUT_MS = 3000;
+
 /**
  * Load an unsandboxed extension from an arbitrary URL. This is dangerous.
  * @param {string} extensionURL
@@ -292,40 +299,33 @@ const teardownUnsandboxedExtensionAPI = () => {
  */
 const loadUnsandboxedExtension = (extensionURL, vm) => new Promise((resolve, reject) => {
     setupUnsandboxedExtensionAPI(vm).then(resolve);
-
-    const script = document.createElement('script');
-    script.onerror = () => {
-        reject(new Error(`Error in unsandboxed script ${extensionURL}. Check the console for more information.`));
-    };
+    let blobURL = null;
     const loadTimeout = setTimeout(() => {
-        script.remove();
         reject(new Error(`Timed out loading unsandboxed extension ${extensionURL}`));
-    }, 20000);
-    script.addEventListener('load', () => clearTimeout(loadTimeout), {once: true});
-    let started = false;
+    }, EXTENSION_LOAD_TIMEOUT_MS);
+
     const startLoading = src => {
-        if (started) return;
-        started = true;
-        script.src = src;
-        document.body.appendChild(script);
+        loadScriptElement(src, extensionURL).then(() => {
+            clearTimeout(loadTimeout);
+            if (blobURL) {
+                URL.revokeObjectURL(blobURL);
+                blobURL = null;
+            }
+        }, err => {
+            clearTimeout(loadTimeout);
+            reject(err);
+        });
     };
-    let cachePromise = null;
-    if (typeof window !== 'undefined' && window.__cysoExtensionCache &&
-        typeof window.__cysoExtensionCache.get === 'function') {
-        try {
-            cachePromise = Promise.resolve(window.__cysoExtensionCache.get(extensionURL));
-        } catch (e) {
-            cachePromise = null;
-        }
-    }
-    if (cachePromise) {
-        // The script must ALWAYS start loading, even if the cache never
-        // answers: race the cache against a short timeout.
-        const timeout = new Promise(resolve => setTimeout(() => resolve(null), 3000));
-        Promise.race([cachePromise.catch(() => null), timeout]).then(cached => {
+
+    const cache = typeof window === 'undefined' ? null : window.__cysoExtensionCache;
+    if (cache && typeof cache.get === 'function') {
+        const cacheTimeout = new Promise(done => setTimeout(() => done(null), EXTENSION_CACHE_TIMEOUT_MS));
+        const cachedContent = Promise.resolve()
+            .then(() => cache.get(extensionURL))
+            .catch(() => null);
+        Promise.race([cachedContent, cacheTimeout]).then(cached => {
             if (cached && typeof cached.content === 'string') {
-                const blobURL = URL.createObjectURL(new Blob([cached.content], {type: 'text/javascript'}));
-                script.addEventListener('load', () => URL.revokeObjectURL(blobURL), {once: true});
+                blobURL = URL.createObjectURL(new Blob([cached.content], {type: 'text/javascript'}));
                 startLoading(blobURL);
             } else {
                 startLoading(extensionURL);

@@ -35,10 +35,10 @@ const loadVector_ = function (costume, runtime, rotationCenter, optVersion) {
         }
 
         // createSVGSkin does the right thing if rotationCenter isn't provided, so it's okay if it's
-            // undefined here
-                const deferTexture = optVersion !== 2 ?
-                    Boolean(runtime.renderer.twCanDeferVectorSkins && runtime.renderer.twCanDeferVectorSkins()) :
-                    false;
+        // undefined here
+        const deferTexture = optVersion !== 2 && typeof runtime.renderer.twCanDeferVectorSkins === 'function' ?
+            runtime.renderer.twCanDeferVectorSkins() :
+            false;
         costume.skinId = runtime.renderer.createSVGSkin(svgString, rotationCenter, {deferTexture});
         costume.size = runtime.renderer.getSkinSize(costume.skinId);
         if (!rotationCenter) {
@@ -346,6 +346,11 @@ const loadBitmap_ = function (costume, runtime, _rotationCenter) {
 // and preserve as much of the original costume data as possible
 // Returns a promise of a costume
 const handleCostumeLoadError = function (costume, runtime) {
+    if (!runtime.renderer) {
+        log.warn('No rendering module present; cannot load costume: ', costume.name);
+        return Promise.resolve(costume);
+    }
+
     // Keep track of the old asset information until we're done loading the default costume
     const oldAsset = costume.asset; // could be null
     const oldAssetId = costume.assetId;
